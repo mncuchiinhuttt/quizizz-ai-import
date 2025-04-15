@@ -1,0 +1,3 @@
+<scirpt lang='ts'>
+    
+</scirpt>

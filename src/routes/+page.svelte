@@ -50,10 +50,14 @@ REASON: [Only provide if STATUS is FAILED. Brief explanation of why parsing fail
 Important guidelines:
 1. Assign a unique sequential number (1, 2, 3, ...) to each identified question as the QUESTION_ID.
 2. Extract the full question text exactly as it appears.
-3. Extract the options labeled A, B, C, D exactly as they appear.
+3. If the question block has options A, B, C, D (or a, b, c, d) without accompanying True/False indicators, then proceed to extract:
+  - The full question text exactly as it appears.
+  - The options labeled A, B, C, D (or a, b, c, d) exactly as they appear.
 4. Preserve all Vietnamese text exactly as it appears in the original.
 5. Process all questions found in the input text that match the A, B, C, D format.
 6. Use three hyphens (---) as a separator between each extracted question block.
+7. Crucially, check if the options (A, B, C, D or a, b, c, d) are accompanied by True/False indicators (e.g., Đ, S, Đúng, Sai, T, F, True, False). These indicators are often placed immediately after or near the option text.
+8. If such True/False indicators are present next to the options, skip this entire question block. Do not extract it or assign it a QUESTION_ID.
 
 Here is the text:
 `;
@@ -84,6 +88,14 @@ Here is the text:
   let selectedQuestions: QuestionData[] = [];
   let notification = '';
   let showNotification = false;
+
+  let maxChunkSize = 15000;
+  let currentChunk = 1;
+  let totalChunks = 1;
+  let processingChunks = false;
+  let allChunksResponse = "";
+  let processedText = "";
+  let remainingText = "";
 
   onMount(async () => {
     try {
@@ -163,12 +175,100 @@ Here is the text:
     parsedQuestions = [];
     successfulQuestions = [];
     failedQuestions = [];
+    allChunksResponse = "";
 
+    if (fileContent.length > maxChunkSize) {
+      processingChunks = true;
+      totalChunks = Math.ceil(fileContent.length / maxChunkSize);
+      currentChunk = 1;
+      remainingText = fileContent;
+      processedText = "";
+
+      while (remainingText.length > 0 && currentChunk <= totalChunks) {
+        await processChunk();
+      }
+
+      apiResponse = allChunksResponse;
+      parseAIResponse(apiResponse);
+      processingChunks = false;
+      isLoading = false;
+    } else {
+      await processSingleRequest(fileContent);
+    }
+  }
+
+  async function processChunk() {
+    try {
+      const chunkSize = Math.min(maxChunkSize, remainingText.length);
+
+      let breakpoint = chunkSize;
+      if (chunkSize < remainingText.length) {
+        const breakChar = remainingText.lastIndexOf("\n\n", chunkSize);
+        if (breakChar > chunkSize * 0.8) {
+          breakpoint = breakChar;
+        }
+      }
+
+      const currentText = remainingText.substring(0, breakpoint);
+
+      let chunkPrompt = userPrompt;
+      if (currentChunk > 1) {
+        chunkPrompt = `This is CHUNK ${currentChunk} of ${totalChunks} from the document. Continue parsing multiple-choice questions from where you left off.
+        
+For EACH question, please format the output in this specific machine-readable format:
+
+QUESTION_ID: [Sequential number continuing from previous chunks]
+QUESTION: [Full question text in Vietnamese or English]
+OPTIONS:
+A. [Option A text]
+B. [Option B text]
+C. [Option C text]
+D. [Option D text]
+CORRECT: [Letter of the correct option, e.g., B]
+STATUS: [SUCCESS if you are confident about the question format and correct answer, FAILED if anything is unclear]
+REASON: [Only provide if STATUS is FAILED. Brief explanation of why parsing failed]
+--- (Use three hyphens as a separator between questions)
+
+Important guidelines:
+1. Assign a unique sequential number (1, 2, 3, ...) to each identified question as the QUESTION_ID.
+2. Extract the full question text exactly as it appears.
+3. Extract the options labeled A, B, C, D exactly as they appear.
+4. Preserve all Vietnamese text exactly as it appears in the original.
+5. Process all questions found in the input text that match the A, B, C, D format.
+6. Use three hyphens (---) as a separator between each extracted question block.
+
+Here is the text for this chunk:
+        `;
+      }
+
+      const genAI = new GoogleGenerativeAI(apiKey);
+      const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+
+      const fullPrompt = chunkPrompt + '\n\n' + currentText;
+
+      const result = await model.generateContent(fullPrompt);
+      const response = result.response;
+      const chunkResponse = response.text();
+
+      allChunksResponse += (currentChunk > 1 ? "\n" : "") + chunkResponse;
+
+      processedText += currentText;
+      remainingText = remainingText.substring(breakpoint);
+
+      currentChunk++;
+    } catch (err: any) {
+      console.error(`Error processing chunk ${currentChunk}:`, err);
+      error = `Error processing chunk ${currentChunk}: ${err.message || 'Unknown error'}`;
+      remainingText = "";
+    }
+  }
+
+  async function processSingleRequest(content: string) {
     try {
       const genAI = new GoogleGenerativeAI(apiKey);
-      const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' }); // Updated model
+      const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
 
-      const fullPrompt = userPrompt + '\n\n' + fileContent;
+      const fullPrompt = userPrompt + '\n\n' + content;
 
       const result = await model.generateContent(fullPrompt);
       const response = result.response;
@@ -194,9 +294,7 @@ Here is the text:
     }
   }
 
-  // --- Function to parse the AI response using RegExp ---
   function parseAIResponse(text: string) {
-    // Updated regex pattern to better capture question blocks, especially with Vietnamese content
     const regex =
       /QUESTION_ID:\s*(\d+|[A-Za-z0-9-]+)\s*\n?QUESTION:\s*([\s\S]*?)(?=\nOPTIONS:)\nOPTIONS:\s*\n?((?:(?:[A-Z]\.\s*[\s\S]*?)(?=\n[A-Z]\.|CORRECT:|$))*)\s*CORRECT:\s*([A-Z]|Unknown)\s*\n?STATUS:\s*(SUCCESS|FAILED)\s*\n?(?:REASON:\s*([\s\S]*?))?(?=\n---|\n\n|$)/g;
 
@@ -205,11 +303,9 @@ Here is the text:
     const failed: QuestionData[] = [];
 
     try {
-      // Use a different approach to get all matches to prevent skipping questions
       let currentMatch;
       const matches = [];
 
-      // Process all matches with a simple loop to ensure none are missed
       while ((currentMatch = regex.exec(text)) !== null) {
         matches.push(currentMatch);
       }
@@ -225,17 +321,15 @@ Here is the text:
 
       console.log(`Found ${matches.length} question matches in the response`);
 
-      // Process each question match
       for (const match of matches) {
         const [_, id, questionText, optionsRaw, correctAnswer, status, reason] = match;
 
-        // Improved options parsing
         const optionsRegex = /([A-Z])\.\s*([\s\S]*?)(?=\n[A-Z]\.|$)/g;
         const options: { [key: string]: string } = {};
 
         let optionMatch;
         while ((optionMatch = optionsRegex.exec(optionsRaw)) !== null) {
-          const [__, key, optionText] = optionMatch; // Renamed _ to __ to avoid conflict
+          const [__, key, optionText] = optionMatch;
           options[key] = optionText.trim();
         }
 
@@ -246,14 +340,12 @@ Here is the text:
           correctAnswer: correctAnswer.trim(),
           status: (status?.trim().toUpperCase() || 'FAILED') as 'SUCCESS' | 'FAILED',
           reason: reason ? reason.trim() : undefined,
-          isMultiAnswer: false // Force single answer since we're ignoring multiple-answer questions
+          isMultiAnswer: false
         };
 
-        // Ensure we have options before adding the question
         if (Object.keys(questionData.options).length > 0) {
           questions.push(questionData);
 
-          // Sort into successful and failed
           if (questionData.status === 'SUCCESS') {
             successful.push(questionData);
           } else {
@@ -264,18 +356,14 @@ Here is the text:
         }
       }
 
-      // Try an alternative approach for Vietnamese questions if primary regex failed or missed some
-      // Simpler Vietnamese-specific regex focusing on numbered questions
-      // Corrected [A|a] to [Aa] etc. and simplified capturing groups
       const vnRegex =
         /Câu\s*(\d+)[.\s:]+([\s\S]*?)(?=A\.|\([Aa]\))([Aa][\.\)][\s\S]*?)(?=B\.|\([Bb]\))([Bb][\.\)][\s\S]*?)(?=C\.|\([Cc]\))([Cc][\.\)][\s\S]*?)(?=D\.|\([Dd]\))([Dd][\.\)][\s\S]*?)(?=Câu\s*\d+|$)/g;
 
       const vnMatches = [];
       let vnMatch: RegExpExecArray | null;
       while ((vnMatch = vnRegex.exec(text)) !== null) {
-        // Check if this question ID was already parsed successfully
         const questionId = vnMatch[1]?.trim();
-        if (questionId) { // Ensure ID was captured
+        if (questionId) {
           const existingQuestion = questions.find((q) => q.id === questionId);
           if (!existingQuestion) {
             vnMatches.push(vnMatch);
@@ -290,12 +378,9 @@ Here is the text:
       }
 
       for (let i = 0; i < vnMatches.length; i++) {
-        // Added type annotations for destructured elements
         const [_, id, questionText, optA, optB, optC, optD]: (string | undefined)[] = vnMatches[i];
 
-        // Ensure required fields are present before creating the object
         if (id && questionText && optA && optB && optC && optD) {
-          // Correctly create the QuestionData object
           const q: QuestionData = {
             id: id.trim(),
             question: questionText.trim(),
@@ -305,14 +390,14 @@ Here is the text:
               C: optC.replace(/^[Cc][\.\)]\s*/, '').trim(),
               D: optD.replace(/^[Dd][\.\)]\s*/, '').trim()
             },
-            correctAnswer: 'Unknown', // Mark as unknown since regex can't determine it
+            correctAnswer: 'Unknown',
             status: 'FAILED',
             reason: 'Could not reliably determine the correct answer from this format.',
             isMultiAnswer: false
           };
 
           questions.push(q);
-          failed.push(q); // Add to failed list as correct answer is unknown
+          failed.push(q);
         } else {
           console.warn('Skipping Vietnamese match due to missing parts:', vnMatches[i]);
         }
@@ -341,24 +426,21 @@ Here is the text:
       delay,
       duration,
       css: (t: number) => `opacity: ${t}; transform: translateY(${(1 - t) * 10}px)`
-    }; // Added missing closing brace
+    };
   }
 
   function updateSelectedQuestions() {
-    // Added type annotation for q
     selectedQuestions = successfulQuestions.filter((q: QuestionData) => q.selected);
   }
 
   function applyDefaultTime() {
-    // Added type annotation for q
     successfulQuestions.forEach((q: QuestionData) => {
       if (q.selected) {
         q.timeInSeconds = defaultTimeInSeconds;
       }
     });
-    // Re-render might be needed if reactivity isn't automatic
     successfulQuestions = [...successfulQuestions];
-    updateSelectedQuestions(); // Update count if needed
+    updateSelectedQuestions();
   }
 
   async function exportToExcel() {
@@ -436,7 +518,6 @@ Here is the text:
 </script>
 
 <div class="min-h-screen bg-gradient-to-br from-[#f8fafc] to-[#e9eef8] dark:from-slate-900 dark:to-slate-800 p-4 sm:p-6">
-  <!-- Using Shadcn Dialog for Notification -->
   <Dialog.Root bind:open={showNotification}>
     <Dialog.Portal>
       <Dialog.Overlay />
@@ -478,18 +559,36 @@ Here is the text:
           </div>
           
           <div class="p-5 space-y-5">
-            <div>
-              <label for="apiKey" class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">Google API Key</label>
-              <div class="relative">
-                <input 
-                  type="password" 
-                  id="apiKey" 
-                  bind:value={apiKey} 
-                  placeholder="Enter your Google AI API Key or leave blank to use environment key" 
-                  class="w-full px-3 py-2.5 border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 dark:focus:ring-indigo-400 focus:border-indigo-500 dark:focus:border-indigo-400 transition-all text-slate-800 dark:text-slate-200 placeholder-slate-400 dark:placeholder-slate-500" 
-                />
+            <div class="flex flex-col sm:flex-row gap-4">
+              <div class="sm:w-1/2">
+                <label for="apiKey" class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">Google API Key</label>
+                <div class="relative">
+                  <input 
+                    type="password" 
+                    id="apiKey" 
+                    bind:value={apiKey} 
+                    placeholder="Enter your Google AI API Key or leave blank to use environment key" 
+                    class="w-full px-3 py-2.5 border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 dark:focus:ring-indigo-400 focus:border-indigo-500 dark:focus:border-indigo-400 transition-all text-slate-800 dark:text-slate-200 placeholder-slate-400 dark:placeholder-slate-500" 
+                  />
+                </div>
+                <p class="mt-1.5 text-xs text-slate-500 dark:text-slate-400">Leave blank to use environment API key if available, or enter your own key.</p>
               </div>
-              <p class="mt-1.5 text-xs text-slate-500 dark:text-slate-400">Leave blank to use environment API key if available, or enter your own key.</p>
+              
+              <div class="sm:w-1/2">
+                <label for="chunkSize" class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">Chunk Size</label>
+                <div class="relative">
+                  <input 
+                    type="number" 
+                    id="chunkSize" 
+                    bind:value={maxChunkSize} 
+                    min="5000" 
+                    max="25000"
+                    step="5000"
+                    class="w-full px-3 py-2.5 border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 dark:focus:ring-indigo-400 focus:border-indigo-500 dark:focus:border-indigo-400 transition-all text-slate-800 dark:text-slate-200 placeholder-slate-400 dark:placeholder-slate-500" 
+                  />
+                </div>
+                <p class="mt-1.5 text-xs text-slate-500 dark:text-slate-400">Characters per chunk (5,000-25,000). Lower is safer but slower.</p>
+              </div>
             </div>
             
             <div>
@@ -551,7 +650,18 @@ Here is the text:
           <span class="!absolute !-m-px !h-px !w-px !overflow-hidden !whitespace-nowrap !border-0 !p-0 ![clip:rect(0,0,0,0)]">Loading...</span>
         </div>
         <p class="mt-4 text-lg font-medium">Analyzing document with AI...</p>
-        <p class="text-sm text-slate-500 dark:text-slate-400">This may take a moment depending on document size</p>
+        {#if processingChunks}
+          <div class="mt-2 flex flex-col items-center">
+            <p class="text-sm text-slate-500 dark:text-slate-400">
+              Processing chunk {currentChunk - 1} of {totalChunks}
+            </p>
+            <div class="w-64 h-2 mt-2 bg-slate-200 dark:bg-slate-700 rounded-full overflow-hidden">
+              <div class="h-full bg-indigo-500 transition-all duration-300" style="width: {Math.round(((currentChunk - 1) / totalChunks) * 100)}%"></div>
+            </div>
+          </div>
+        {:else}
+          <p class="text-sm text-slate-500 dark:text-slate-400">This may take a moment depending on document size</p>
+        {/if}
       </div>
     {/if}
 
@@ -756,7 +866,6 @@ Here is the text:
                         <FileText class="h-4 w-4" />
                       </button>
                       
-                      <!-- Edit Modal -->
                       <div id={`edit-modal-${i}`} class="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center p-4 hidden">
                         <div class="bg-white dark:bg-slate-800 rounded-lg shadow-xl max-w-lg w-full max-h-[90vh] overflow-auto">
                           <div class="p-4 border-b border-slate-200 dark:border-slate-700 flex justify-between items-center">
@@ -895,7 +1004,6 @@ Here is the text:
     </section>
     {/if}
 
-    <!-- Add success dialog -->
     <div id="success-dialog" class="hidden fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center p-4">
       <div class="bg-white dark:bg-slate-800 rounded-lg shadow-xl max-w-lg w-full max-h-[90vh] overflow-auto">
         <div class="p-4 border-b border-slate-200 dark:border-slate-700 flex justify-between items-center">

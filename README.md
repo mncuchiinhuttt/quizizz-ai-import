@@ -1,38 +1,36 @@
-# sv
+# Quizizz AI Import
 
-Everything you need to build a Svelte project, powered by [`sv`](https://github.com/sveltejs/cli).
+A modern application that uses AI to extract multiple-choice questions from DOCX files for easy import into Quizizz and other quiz platforms.
 
-## Creating a project
+## Features
 
-If you're seeing this, you've probably already done this step. Congrats!
+- Extract multiple-choice questions from DOCX files using AI
+- Auto-detect question formats and correct answers
+- Export to Excel in Quizizz-compatible format
+- Add time limits, image links, and answer explanations
+- Support for Vietnamese and English content
 
-```bash
-# create a new project in the current directory
-npx sv create
+## Getting Started
 
-# create a new project in my-app
-npx sv create my-app
-```
+1. Download the latest release for your platform
+2. Launch the application
+3. Enter your Google AI API key or use the environment variable
+4. Upload a DOCX file with multiple-choice questions
+5. Click "Extract Questions" to process
 
-## Developing
+## Requirements
 
-Once you've created a project and installed dependencies with `npm install` (or `pnpm install` or `yarn`), start a development server:
+- Google AI API key (Gemini model)
+- DOCX files with structured multiple-choice questions
 
-```bash
-npm run dev
+## Release v1.0
 
-# or start the server and open the app in a new browser tab
-npm run dev -- --open
-```
+The first stable release of Quizizz AI Import includes:
 
-## Building
+- Complete question extraction pipeline
+- Excel export functionality
+- Vietnamese language support
+- Dark/light mode
+- Configuration options for all question parameters
 
-To create a production version of your app:
-
-```bash
-npm run build
-```
-
-You can preview the production build with `npm run preview`.
-
-> To deploy your app, you may need to install an [adapter](https://svelte.dev/docs/kit/adapters) for your target environment.
+Built with SvelteKit, Tailwind CSS, and Tauri.
